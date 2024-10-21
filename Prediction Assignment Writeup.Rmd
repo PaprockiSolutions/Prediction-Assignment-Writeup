@@ -1,0 +1,237 @@
+---
+title: "Predicting Exercise Movements with Accelerometer Data: A Machine Learning Approach"
+author: "Artem Paprocki"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: cerulean
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+GitHub Repo: https://github.com/PaprockiSolutions/Prediction-Assignment-Writeup
+
+# Introduction
+
+This project focuses on predicting exercise movements based on data collected from accelerometers placed on participants' belt, forearm, arm, and dumbbell during a specific workout (Unilateral Dumbbell Biceps Curl). The goal is to accurately classify the type of exercise using machine learning models, specifically a Decision Tree and Random Forest. The ultimate aim is to determine which model provides the best accuracy and the lowest out-of-sample error.
+
+# Data Sources
+
+The training data used can be found [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv), and the test data is available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv). The original data comes from the Human Activity Recognition (HAR) dataset, which can be accessed [here](http://groupware.les.inf.puc-rio.br/har).
+
+# Data Loading and Preprocessing
+
+We begin by loading the necessary libraries and reading in the data.
+
+```{r, message=FALSE, warning=FALSE}
+library(caret)
+library(randomForest)
+library(ggplot2)
+library(corrplot)
+library(rpart)
+library(rpart.plot)
+
+set.seed(123)
+
+train_data <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+test_data <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+The training dataset contains 19622 observations and 160 variables, while the testing set contains 20 observations and 160 variables.
+
+```{r}
+# Exploring dataset dimensions
+dim(train_data)
+dim(test_data)
+```
+After loading the data, we begin by removing **near-zero variance (NZV)** variables, which do not significantly contribute to model performance. We also remove columns with **missing values** and those **irrelevant to the prediction task** (e.g., timestamps, user IDs). Finally, we ensure that the target variable (`classe`) is treated as a factor for classification.
+
+```{r cleaning-data}
+NZV <- nearZeroVar(train_data, saveMetrics = TRUE)
+cleaned_train_data <- train_data[, !NZV$nzv]
+cleaned_train_data <- cleaned_train_data[, colSums(is.na(cleaned_train_data)) == 0]
+cleaned_train_data <- cleaned_train_data[, !grepl("^X|timestamp|user_name", names(cleaned_train_data))]
+cleaned_train_data$classe <- as.factor(cleaned_train_data$classe)
+
+dim(cleaned_train_data)
+```
+
+After cleaning, the training dataset is reduced to **`r nrow(cleaned_train_data)`** observations and **`r ncol(cleaned_train_data)`** variables.
+
+# Correlation Matrix
+
+A correlation matrix helps to identify relationships between predictor variables. Strong correlations might indicate redundancy, which can affect model performance. Understanding these relationships allows us to handle multicollinearity effectively.
+
+```{r correlation-matrix}
+corrplot(cor(cleaned_train_data[, -length(names(cleaned_train_data))]), method = "color", tl.cex = 0.5)
+```
+
+# Model Building
+
+We now split the cleaned dataset into training and validation sets to assess the performance of our models. The data is split in an 80/20 ratio, meaning that 80% of the data is used for training the model, while the remaining 20% is reserved for validating its performance. This approach ensures that the model is evaluated on unseen data to prevent overfitting and provides an estimate of how well it will generalize to new data.
+
+```{r split-data}
+# Split the cleaned dataset into training and validation sets
+trainIndex <- createDataPartition(cleaned_train_data$classe, p = 0.8, 
+                                  list = FALSE)
+train_set <- cleaned_train_data[trainIndex, ]
+validation_set <- cleaned_train_data[-trainIndex, ]
+```
+
+
+The bar plot below shows the distribution of the `classe` variable in both the training and validation sets. Each bar represents the count of observations for a specific exercise class (A, B, C, D, or E), split between the training and validation datasets. Ideally, we want a balanced distribution in both sets to ensure that the model has sufficient data to learn from each class and that no class is over- or under-represented.
+
+```{r, echo=FALSE}
+# Create a dataframe for visualization purposes
+train_vis <- data.frame(classe = train_set$classe, set = "Training")
+validation_vis <- data.frame(classe = validation_set$classe, set = "Validation")
+combined_vis <- rbind(train_vis, validation_vis)
+
+# Create a bar plot to visualize the distribution of classes
+ggplot(combined_vis, aes(x = classe, fill = set)) +
+        geom_bar(position = "dodge") +
+        labs(title = "Distribution of Classes in Training and Validation Sets",
+             x = "Class",
+             y = "Count") +
+        theme(plot.title = element_text(hjust = 0.5))
+```
+
+The bar plot reveals that the distribution of the `classe` variable in both the training and validation sets is consistent. Each exercise class (A, B, C, D, E) appears to be well-represented in both sets, ensuring that the model will be trained on a diverse range of classes. This balanced distribution is crucial for building a model that performs well across all exercise classes, avoiding bias toward any particular class.
+
+## Decision Tree Model
+
+Decision Trees are easy to interpret and visualize, making them a good starting point for model building. However, they are prone to overfitting.
+
+```{r decision-tree}
+modelTree <- rpart(classe ~ ., data = train_set, method = "class")
+prp(modelTree)
+
+predictTree <- predict(modelTree, validation_set, type = "class")
+confMatrixTree <- confusionMatrix(validation_set$classe, predictTree)
+
+print(confMatrixTree)
+```
+
+```{r, echo=FALSE}
+# Calculate accuracy and out-of-sample error
+accuracy_tree <- confMatrixTree$overall['Accuracy']
+ose_tree <- 1 - accuracy_tree
+
+# Convert accuracy and OSE to percentage format
+accuracy_tree_pct <- round(as.numeric(accuracy_tree) * 100, 2)
+ose_tree_pct <- round(ose_tree * 100, 2)
+```
+
+The **Decision Tree model** achieves an accuracy of approximately **`r accuracy_tree_pct`%** with an out-of-sample error of **`r ose_tree_pct`%**.
+
+## Random Forest Model
+
+Random Forests are robust against overfitting and can handle correlated variables better than Decision Trees, making them a superior choice for this task. We use 5-fold cross-validation to evaluate model performance and select the optimal hyperparameters.
+
+```{r random-forest}
+control <- trainControl(method = "cv", number = 5)
+rf_model <- train(classe ~ ., data = train_set, method = "rf", trControl = control)
+
+print(rf_model)
+```
+
+The optimal `mtry` value is selected based on the highest accuracy during cross-validation.
+
+### Feature Importance
+
+Random Forest models offer a built-in way to calculate feature importance, which helps identify the most relevant predictors for classification.
+
+```{r feature-importance}
+importance_rf <- varImp(rf_model)
+
+plot(importance_rf, top = 20, main = "Top 20 Important Features in Random Forest")
+```
+
+The plot highlights the 20 most important variables used by the Random Forest model for classifying the exercise movements.
+
+- The variable `num_window` is the most important, with a normalized importance score of 100, meaning it contributes the most to the prediction accuracy.
+- Other key variables include `roll_belt`, `pitch_forearm`, and `yaw_belt`, which are important for distinguishing between different classes of exercises.
+
+### Cross-validation Accuracy Plot
+
+We can plot the accuracy of the Random Forest model across the 5 cross-validation folds to show how the model performs consistently across the validation sets.
+
+```{r rf-cv-accuracy}
+cv_results <- rf_model$resample
+
+ggplot(cv_results, aes(x = Resample, y = Accuracy)) +
+        geom_point() +
+        labs(title = "Random Forest Accuracy Across Cross-Validation Folds", y = "Accuracy") +
+        theme(plot.title = element_text(hjust = 0.5))
+```
+```{r, echo=FALSE}
+# Dynamically calculate accuracy values
+min_accuracy <- round(min(cv_results$Accuracy) * 100, 2)
+max_accuracy <- round(max(cv_results$Accuracy) * 100, 2)
+```
+
+The Cross-validation Accuracy Plot demonstrates the performance consistency of the Random Forest model across the 5 cross-validation folds. The accuracy values range from approximately **`r min_accuracy`%** to **`r max_accuracy`%**, indicating that the model performs reliably across different subsets of the training data.
+
+The plot shows minimal variation in accuracy, confirming that the Random Forest model is stable and not overly sensitive to the specific training and validation splits. This high and consistent accuracy across all folds reinforces the robustness of the model for predicting exercise classes.
+
+### Performance Assessment
+
+We now assess the performance of the Random Forest model using the validation set.
+
+```{r}
+predictions_rf <- predict(rf_model, newdata = validation_set)
+confMatrixRF <- confusionMatrix(predictions_rf, validation_set$classe)
+
+print(confMatrixRF)
+```
+
+```{r, echo=FALSE}
+# Calculate accuracy and out-of-sample error
+accuracy_rf <- confMatrixRF$overall['Accuracy']
+ose_rf <- 1 - accuracy_rf
+# Convert to percentage format
+accuracy_rf_pct <- round(as.numeric(accuracy_rf) * 100, 2)
+ose_rf_pct <- round(ose_rf * 100, 2)
+```
+
+The **Random Forest model** achieves an impressive accuracy of **`r accuracy_rf_pct`%** with an out-of-sample error of **`r ose_rf_pct`%**.
+
+### Confusion Matrix Heatmap
+
+A heatmap of the confusion matrix can give an intuitive visual representation of the model's performance. It shows how well the Random Forest model performs for each class.
+
+```{r rf-heatmap}
+# Extract confusion matrix for Random Forest
+rf_conf_matrix <- as.data.frame(confMatrixRF$table)
+
+# Plot heatmap
+ggplot(rf_conf_matrix, aes(Prediction, Reference, fill = Freq)) +
+        geom_tile() +
+        geom_text(aes(label = Freq), color = "white") +
+        scale_fill_gradient(low = "lightblue", high = "darkblue") +
+        labs(title = "Confusion Matrix Heatmap - Random Forest") +
+        theme(plot.title = element_text(hjust = 0.5))
+```
+
+There are a few misclassifications, notably with class D being misclassified as class E several times. Overall, the heatmap highlights the model's strengths in classifying most instances correctly while allowing for quick identification of areas for potential improvement.
+
+# Predictions on Test Data
+
+Finally, we apply the **Random Forest model** to predict the exercise manner for the test cases.
+
+```{r predictions}
+# Select columns in test data matching the training set
+test_data_clean <- test_data[, intersect(names(train_set), names(test_data))]
+
+# Make predictions
+test_predictions <- predict(rf_model, newdata = test_data_clean)
+
+# Display the predictions
+test_predictions
+```
+
+# Conclusion
+
+The Random Forest model significantly outperforms the Decision Tree model in terms of accuracy, with a **`r accuracy_rf_pct`%** accuracy rate. Given its robustness and low out-of-sample error, the Random Forest model is selected as the final model for predicting the manner of exercise based on accelerometer data.
